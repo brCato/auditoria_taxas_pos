@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auditor de Taxas POS — Conciliação de Adquirentes</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          paper: '#F6F4EE',
+          ink: '#152420',
+          pine: {
+            DEFAULT: '#10322C',
+            50: '#EAF1EE',
+            600: '#1B4A40',
+            700: '#10322C',
+            800: '#0B241F',
+          },
+          teal: {
+            DEFAULT: '#2F6F63',
+            50: '#EBF4F1',
+          },
+          amber: {
+            DEFAULT: '#C4841D',
+            50: '#FBF1E0',
+          },
+          good: {
+            DEFAULT: '#1E7145',
+            bg: '#E7F4EC',
+            border: '#BFE3CC',
+          },
+          bad: {
+            DEFAULT: '#AE2B21',
+            bg: '#FCEAE8',
+            border: '#F3C6C1',
+          },
+        },
+        fontFamily: {
+          display: ['"Space Grotesk"', 'sans-serif'],
+          body: ['Inter', 'sans-serif'],
+          mono: ['"IBM Plex Mono"', 'monospace'],
+        },
+      }
+    }
+  }
+</script>
+<style>
+  body { font-family: 'Inter', sans-serif; background-color: #F6F4EE; color: #152420; }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  .font-mono { font-family: 'IBM Plex Mono', monospace; }
+
+  /* ledger paper texture for main background */
+  .ledger-bg {
+    background-image: repeating-linear-gradient(to bottom, rgba(16,50,44,0.035) 0px, rgba(16,50,44,0.035) 1px, transparent 1px, transparent 34px);
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #C9C3B4; border-radius: 8px; }
+
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { opacity: 1; }
+
+  .rate-input:focus { outline: none; border-color: #2F6F63; box-shadow: 0 0 0 3px rgba(47,111,99,0.15); }
+
+  .dropzone.dragover { background-color: #EBF4F1; border-color: #2F6F63; }
+
+  .stamp {
+    transform: rotate(-8deg);
+    border: 3px solid #1E7145;
+    color: #1E7145;
+  }
+
+  .tab-pill { transition: all .15s ease; }
+
+  details.parcel-group[open] > summary .chev { transform: rotate(90deg); }
+  summary::-webkit-details-marker { display: none; }
+
+  .divergence-row td { font-variant-numeric: tabular-nums; }
+
+  @media print { .no-print { display: none !important; } }
+</style>
+</head>
+<body class="ledger-bg min-h-screen">
+
+<!-- ======================= HEADER ======================= -->
+<header class="bg-pine text-paper border-b-4 border-amber">
+  <div class="max-w-[1400px] mx-auto px-5 md:px-8 py-5 flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-md bg-amber/90 flex items-center justify-center font-display font-bold text-pine-800 text-lg shrink-0">%</div>
+      <div>
+        <h1 class="font-display font-semibold text-xl md:text-2xl leading-tight tracking-tight">Auditor de Taxas POS</h1>
+        <p class="text-pine-50/70 text-xs md:text-sm">Conciliação de tarifas de maquininha — 100% local, seus dados não saem do navegador</p>
+      </div>
+    </div>
+    <div class="hidden md:flex items-center gap-2 text-xs font-mono text-pine-50/80 bg-pine-800/60 border border-pine-600 rounded-full px-3 py-1.5">
+      <span class="w-2 h-2 rounded-full bg-good animate-pulse"></span>
+      Processamento client-side
+    </div>
+  </div>
+</header>
+
+<div class="max-w-[1400px] mx-auto px-5 md:px-8 py-6 grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start">
+
+  <!-- ======================= SIDEBAR: CONFIG ======================= -->
+  <aside class="lg:sticky lg:top-6">
+    <div class="bg-white border border-pine/10 rounded-2xl shadow-sm overflow-hidden">
+      <div class="px-5 pt-5 pb-3 border-b border-dashed border-pine/15">
+        <h2 class="font-display font-semibold text-base text-pine">Taxas negociadas</h2>
+        <p class="text-xs text-ink/60 mt-1">Informe os percentuais acordados com a adquirente. Ficam salvos apenas no seu navegador.</p>
+      </div>
+
+      <div class="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
+
+        <div>
+          <label class="flex items-center justify-between text-sm font-medium text-ink mb-1">
+            <span>Débito</span>
+            <span class="text-[10px] font-mono text-ink/40">%</span>
+          </label>
+          <input type="number" step="0.01" min="0" max="100" id="rate-debito" placeholder="1.00"
+            class="rate-input w-full font-mono text-sm border border-pine/20 rounded-lg px-3 py-2 bg-paper/40 transition">
+        </div>
+
+        <div>
+          <label class="flex items-center justify-between text-sm font-medium text-ink mb-1">
+            <span>Crédito à vista</span>
+            <span class="text-[10px] font-mono text-ink/40">%</span>
+          </label>
+          <input type="number" step="0.01" min="0" max="100" id="rate-vista" placeholder="2.00"
+            class="rate-input w-full font-mono text-sm border border-pine/20 rounded-lg px-3 py-2 bg-paper/40 transition">
+        </div>
+
+        <div>
+          <label class="flex items-center justify-between text-sm font-medium text-ink mb-1">
+            <span>Pix na maquininha</span>
+            <span class="text-[10px] font-mono text-ink/40">%</span>
+          </label>
+          <input type="number" step="0.01" min="0" max="100" id="rate-pix" placeholder="0.75"
+            class="rate-input w-full font-mono text-sm border border-pine/20 rounded-lg px-3 py-2 bg-paper/40 transition">
+          <p class="text-[11px] text-ink/45 mt-1">Deixe em branco se sua adquirente não cobra taxa sobre Pix.</p>
+        </div>
+
+        <details class="parcel-group border border-pine/15 rounded-lg" open>
+          <summary class="cursor-pointer select-none px-3 py-2.5 flex items-center justify-between text-sm font-medium text-ink bg-teal-50/60 rounded-lg">
+            <span>Crédito parcelado (2x–21x)</span>
+            <svg class="chev w-3.5 h-3.5 transition-transform text-pine" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M9 6l6 6-6 6"/></svg>
+          </summary>
+          <div id="parcelas-grid" class="grid grid-cols-3 gap-2 p-3"></div>
+        </details>
+
+      </div>
+
+      <div class="px-5 pb-5 pt-2 flex gap-2 border-t border-dashed border-pine/15">
+        <button id="btn-save-config" class="flex-1 bg-pine hover:bg-pine-600 text-paper text-sm font-medium rounded-lg px-4 py-2.5 transition">Salvar configuração</button>
+        <button id="btn-clear-config" title="Limpar todos os campos" class="border border-pine/20 hover:bg-paper text-ink/60 text-sm rounded-lg px-3 py-2.5 transition">Limpar</button>
+      </div>
+      <p id="config-saved-msg" class="hidden text-xs text-good text-center pb-3 -mt-2 font-medium">✓ Configuração salva neste navegador</p>
+    </div>
+  </aside>
+
+  <!-- ======================= MAIN ======================= -->
+  <main class="space-y-6 min-w-0">
+
+    <!-- Upload -->
+    <section class="bg-white border border-pine/10 rounded-2xl shadow-sm p-5">
+      <h2 class="font-display font-semibold text-base text-pine mb-1">Relatório da adquirente</h2>
+      <p class="text-xs text-ink/60 mb-4">Envie o extrato de vendas em <span class="font-mono">.csv</span> ou <span class="font-mono">.xlsx</span>. Reconhecemos automaticamente os layouts das principais adquirentes do mercado brasileiro (Stone, Cielo, Rede, Getnet, PagBank, Ton, SumUp, InfinitePay, SafraPay, Mercado Pago, Vero, Bin, Global Payments, Zettle, Nubank, entre outras com nomenclatura similar). Débito, crédito à vista, crédito parcelado e <strong>Pix na maquininha</strong> são auditados.</p>
+
+      <div id="dropzone" class="dropzone border-2 border-dashed border-pine/25 rounded-xl py-10 px-4 text-center cursor-pointer transition">
+        <input type="file" id="file-input" accept=".csv,.xlsx,.xls" class="hidden">
+        <svg class="w-10 h-10 mx-auto text-pine/40 mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0L7 9m5-5l5 5M5 20h14"/></svg>
+        <p class="text-sm font-medium text-ink">Arraste o arquivo aqui ou <span class="text-teal underline">clique para selecionar</span></p>
+        <p class="text-xs text-ink/50 mt-1">.CSV ou .XLSX</p>
+      </div>
+      <p id="file-name-display" class="hidden text-xs font-mono text-ink/60 mt-2"></p>
+      <p id="parse-error" class="hidden text-xs text-bad mt-2 bg-bad-bg border border-bad-border rounded-lg px-3 py-2"></p>
+    </section>
+
+    <!-- Dashboard -->
+    <section id="dashboard" class="hidden space-y-4">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="bg-white border border-pine/10 rounded-xl p-4">
+          <p class="text-[11px] uppercase tracking-wide text-ink/50 font-medium">Total bruto processado</p>
+          <p id="stat-bruto" class="font-mono font-semibold text-xl text-pine mt-1">R$ 0,00</p>
+        </div>
+        <div class="bg-white border border-pine/10 rounded-xl p-4">
+          <p class="text-[11px] uppercase tracking-wide text-ink/50 font-medium">Total de taxas cobradas</p>
+          <p id="stat-taxas" class="font-mono font-semibold text-xl text-pine mt-1">R$ 0,00</p>
+        </div>
+        <div id="card-divergencias" class="bg-white border border-pine/10 rounded-xl p-4">
+          <p class="text-[11px] uppercase tracking-wide text-ink/50 font-medium">Divergências encontradas</p>
+          <p id="stat-count" class="font-mono font-semibold text-xl text-pine mt-1">0</p>
+        </div>
+        <div id="card-prejuizo" class="bg-white border border-pine/10 rounded-xl p-4">
+          <p class="text-[11px] uppercase tracking-wide text-ink/50 font-medium">Prejuízo total (cobrado a mais)</p>
+          <p id="stat-prejuizo" class="font-mono font-semibold text-xl text-pine mt-1">R$ 0,00</p>
+        </div>
+      </div>
+      <p id="ignored-note" class="hidden text-xs text-ink/45 font-mono"></p>
+
+      <!-- success message -->
+      <div id="success-box" class="hidden bg-good-bg border border-good-border rounded-2xl p-8 text-center">
+        <div class="stamp inline-flex flex-col items-center px-6 py-3 rounded-lg mb-3">
+          <span class="font-display font-bold text-sm tracking-widest">✓ CONFERE</span>
+        </div>
+        <p class="font-display font-semibold text-lg text-good">Parabéns! Nenhuma divergência de taxa encontrada.</p>
+        <p class="text-sm text-good/80 mt-1">Todas as taxas praticadas no relatório correspondem ao que foi negociado.</p>
+      </div>
+
+      <!-- divergence table -->
+      <div id="table-box" class="hidden bg-white border border-pine/10 rounded-2xl shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-dashed border-pine/15 flex items-center justify-between">
+          <div>
+            <h2 class="font-display font-semibold text-base text-bad">Transações divergentes</h2>
+            <p class="text-xs text-ink/60">Somente linhas em que a taxa praticada foi maior que a taxa negociada</p>
+          </div>
+          <span id="table-count-badge" class="font-mono text-xs bg-bad-bg text-bad border border-bad-border rounded-full px-3 py-1">0 linhas</span>
+        </div>
+        <div class="overflow-x-auto max-h-[560px]">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-pine-50 text-pine text-xs uppercase tracking-wide">
+              <tr>
+                <th class="text-left font-semibold px-4 py-2.5 whitespace-nowrap">Data/Hora</th>
+                <th class="text-left font-semibold px-4 py-2.5 whitespace-nowrap">ID / Código</th>
+                <th class="text-left font-semibold px-4 py-2.5 whitespace-nowrap">Modalidade</th>
+                <th class="text-right font-semibold px-4 py-2.5 whitespace-nowrap">Valor bruto</th>
+                <th class="text-right font-semibold px-4 py-2.5 whitespace-nowrap">Taxa negociada</th>
+                <th class="text-right font-semibold px-4 py-2.5 whitespace-nowrap">Taxa praticada</th>
+                <th class="text-right font-semibold px-4 py-2.5 whitespace-nowrap">Diferença (R$)</th>
+              </tr>
+            </thead>
+            <tbody id="table-body" class="divide-y divide-pine/10 font-mono"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- download gate -->
+      <div class="bg-white border border-pine/10 rounded-2xl shadow-sm p-5">
+        <h2 class="font-display font-semibold text-base text-pine mb-1">Baixar relatório completo</h2>
+        <p class="text-xs text-ink/60 mb-4">Informe seu e-mail para liberar o download do relatório em <span class="font-mono">.xlsx</span> (resumo executivo + transações divergentes). O e-mail será enviado ao Netlify para registro do lead e não é incluído no arquivo de vendas.</p>
+        <div class="flex flex-col sm:flex-row gap-2">
+          <input type="email" id="download-email" placeholder="seuemail@empresa.com.br"
+            class="rate-input flex-1 text-sm border border-pine/20 rounded-lg px-3 py-2.5 bg-paper/40 transition">
+          <button id="btn-download-report" disabled
+            class="bg-pine text-paper text-sm font-medium rounded-lg px-5 py-2.5 transition disabled:opacity-40 disabled:cursor-not-allowed enabled:hover:bg-pine-600 whitespace-nowrap">
+            ⬇ Baixar relatório (.xlsx)
+          </button>
+        </div>
+        <p id="download-email-error" class="hidden text-xs text-bad mt-2">Informe um e-mail válido para liberar o download.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="max-w-[1400px] mx-auto px-5 md:px-8 pb-10 pt-4 text-center text-xs text-ink/40">
+  Ferramenta 100% client-side — nenhum dado de venda é enviado a servidores externos.
+</footer>
+
+<!-- Formulário detectável pelo Netlify Forms. O envio real é feito via fetch no JavaScript. -->
+<form name="lead-capture" method="POST" data-netlify="true" data-netlify-honeypot="bot-field" hidden>
+  <input type="hidden" name="form-name" value="lead-capture">
+  <input type="text" name="bot-field">
+  <input type="email" name="email">
+</form>
+
+<script>
+/* =========================================================================
+   1. CONFIGURAÇÃO DE TAXAS — geração dos campos de parcela + persistência
+   ========================================================================= */
+const STORAGE_KEY = 'auditorTaxasPOS_config_v1';
+const parcelasGrid = document.getElementById('parcelas-grid');
+
+for (let n = 2; n <= 21; n++) {
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <label class="block text-[11px] font-medium text-ink/70 mb-0.5">${n}x</label>
+    <input type="number" step="0.01" min="0" max="100" id="rate-p${n}" placeholder="--"
+      class="rate-input w-full font-mono text-xs border border-pine/20 rounded-md px-2 py-1.5 bg-paper/40 transition">
+  `;
+  parcelasGrid.appendChild(wrap);
+}
+
+function collectConfig() {
+  const cfg = {
+    debito: parseFloat(document.getElementById('rate-debito').value),
+    vista: parseFloat(document.getElementById('rate-vista').value),
+    pix: parseFloat(document.getElementById('rate-pix').value),
+  };
+  for (let n = 2; n <= 21; n++) {
+    cfg['p' + n] = parseFloat(document.getElementById('rate-p' + n).value);
+  }
+  return cfg;
+}
+
+function applyConfig(cfg) {
+  if (!cfg) return;
+  if (cfg.debito !== undefined && !isNaN(cfg.debito)) document.getElementById('rate-debito').value = cfg.debito;
+  if (cfg.vista !== undefined && !isNaN(cfg.vista)) document.getElementById('rate-vista').value = cfg.vista;
+  if (cfg.pix !== undefined && !isNaN(cfg.pix)) document.getElementById('rate-pix').value = cfg.pix;
+  for (let n = 2; n <= 21; n++) {
+    const v = cfg['p' + n];
+    if (v !== undefined && !isNaN(v)) document.getElementById('rate-p' + n).value = v;
+  }
+}
+
+function loadConfig() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) applyConfig(JSON.parse(raw));
+  } catch (e) { /* ignore corrupted storage */ }
+}
+
+document.getElementById('btn-save-config').addEventListener('click', () => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(collectConfig()));
+  const msg = document.getElementById('config-saved-msg');
+  msg.classList.remove('hidden');
+  setTimeout(() => msg.classList.add('hidden'), 2200);
+  // reprocess file if one is already loaded, so the audit reflects new rates
+  if (window.__lastParsedRows) runAudit(window.__lastParsedRows);
+});
+
+document.getElementById('btn-clear-config').addEventListener('click', () => {
+  document.querySelectorAll('.rate-input').forEach(i => i.value = '');
+  localStorage.removeItem(STORAGE_KEY);
+});
+
+loadConfig();
+
+/* =========================================================================
+   2. UPLOAD (drag & drop + seleção manual)
+   ========================================================================= */
+const dropzone = document.getElementById('file-input') && document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const fileNameDisplay = document.getElementById('file-name-display');
+const parseError = document.getElementById('parse-error');
+
+dropzone.addEventListener('click', () => fileInput.click());
+['dragenter','dragover'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover');
+}));
+['dragleave','drop'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover');
+}));
+dropzone.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+fileInput.addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) handleFile(f);
+});
+
+function handleFile(file) {
+  parseError.classList.add('hidden');
+  fileNameDisplay.classList.remove('hidden');
+  fileNameDisplay.textContent = `Arquivo: ${file.name}`;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: 'array', codepage: 65001, cellDates: false });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null, raw: true });
+      if (!rows.length) {
+        showParseError('O arquivo foi lido, mas nenhuma linha de dados foi encontrada. Verifique se a primeira linha contém os cabeçalhos das colunas.');
+        return;
+      }
+      window.__lastParsedRows = rows;
+      runAudit(rows);
+    } catch (err) {
+      showParseError('Não foi possível ler este arquivo. Confirme se é um .CSV ou .XLSX válido. Detalhe técnico: ' + err.message);
+    }
+  };
+  reader.onerror = () => showParseError('Falha ao carregar o arquivo do disco.');
+  reader.readAsArrayBuffer(file);
+}
+
+function showParseError(msg) {
+  parseError.textContent = msg;
+  parseError.classList.remove('hidden');
+  document.getElementById('dashboard').classList.add('hidden');
+}
+
+/* =========================================================================
+   3. MAPEAMENTO DE COLUNAS — normalização + dicionário de sinônimos
+   ========================================================================= */
+
+// Normaliza um cabeçalho de coluna para comparação:
+// preserva o significado de "%" (percentual) e "R$/BRL" (moeda) como tokens
+// antes de remover acentuação e pontuação, evitando colisão entre colunas
+// de taxa percentual e taxa em reais (ex: "Taxa (%)" vs "Taxa (R$)").
+function normalizeHeader(h) {
+  let s = String(h == null ? '' : h);
+  s = s.replace(/%/g, ' pct ');
+  s = s.replace(/r\$/gi, ' brl ');
+  s = s.replace(/\bbrl\b/gi, ' brl ');
+  s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  s = s.toLowerCase();
+  s = s.replace(/[^a-z0-9\s]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function normalizeText(v) {
+  if (v == null) return '';
+  let s = String(v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return s;
+}
+
+// dicionário: campo lógico -> lista de sinônimos normalizados, em ordem de prioridade
+const COLUMN_SYNONYMS = {
+  date:            ['data', 'data venda', 'data da venda', 'transaction date', 'date', 'data movimento', 'data lancamento'],
+  time:            ['hora', 'time'],
+  id:              ['transaction id', 'id da transacao', 'codigo transacao', 'stone id', 'ton id', 'external id',
+                     'source id', 'cod referencia', 'receipt number', 'nsu tid', 'nsu', 'id', 'codigo da venda'],
+  modality:        ['modalidade', 'tipo de pagamento', 'tipo pagamento', 'payment method', 'produto',
+                     'tipo de venda', 'card type', 'meio de pagamento', 'transaction type'],
+  statusText:      ['status', 'status pgto', 'situacao'],
+  installTotal:    ['n parcelas', 'total parcelas', 'parcelas', 'installments', 'numero parcelas', 'qtd parcelas'],
+  installCurrent:  ['n parcela', 'parcela atual', 'numero parcela', 'installment number'],
+  gross:           ['valor bruto brl', 'valor bruto', 'gross amount', 'amount brl', 'amount', 'valor da venda'],
+  net:             ['valor liquido brl', 'valor liquido', 'net amount brl', 'net amount'],
+  ratePercent:     ['taxa pct', 'taxa aplicada pct', 'taxa mdr pct', 'mdr pct', 'mdr rate pct', 'taxa aplicada', 'taxa mdr'],
+  feeCurrency:     ['taxa brl', 'valor taxa brl', 'valor taxa', 'fee brl', 'tarifa brl', 'valor mdr brl', 'valor mdr', 'fee', 'tarifa'],
+};
+
+// recebe as chaves originais (cabeçalhos) de uma linha e devolve
+// um mapa { campoLogico: cabecalhoOriginal } para o arquivo inteiro
+function buildColumnMap(sampleRow) {
+  const originalKeys = Object.keys(sampleRow);
+  const normalizedToOriginal = {};
+  originalKeys.forEach(k => { normalizedToOriginal[normalizeHeader(k)] = k; });
+
+  const map = {};
+  for (const field in COLUMN_SYNONYMS) {
+    for (const syn of COLUMN_SYNONYMS[field]) {
+      if (normalizedToOriginal[syn] !== undefined) {
+        map[field] = normalizedToOriginal[syn];
+        break;
+      }
+    }
+  }
+  return map;
+}
+
+/* =========================================================================
+   4. PARSING DE VALORES (número flexível, extração de parcelas por texto)
+   ========================================================================= */
+function parseFlexNumber(v) {
+  if (v === null || v === undefined || v === '') return NaN;
+  if (typeof v === 'number') return v;
+  let s = String(v).trim();
+  if (s === '') return NaN;
+  // remove símbolos de moeda e espaços
+  s = s.replace(/r\$/gi, '').replace(/\s/g, '');
+  // formato "1.234,56" -> "1234.56" | formato "1,99" -> "1.99"
+  if (s.includes(',') && s.includes('.')) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = parseFloat(s);
+  return n;
+}
+
+function extractInstallmentsFromText(text) {
+  const m = normalizeText(text).match(/(\d{1,2})\s*x\b/);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+/* =========================================================================
+   5. CLASSIFICAÇÃO DE MODALIDADE
+   ========================================================================= */
+function classifyRow(modalityRaw, statusRaw, totalInstallments) {
+  const blob = normalizeText([modalityRaw, statusRaw].filter(Boolean).join(' '));
+
+  if (/cancel|estorn|refund|reembols|chargeback|devolv/.test(blob)) {
+    return { skip: true, reason: 'cancelada/estornada' };
+  }
+  if (/\bpix\b/.test(blob)) {
+    return { skip: false, type: 'pix', label: 'Pix' };
+  }
+  if (/saque|withdraw|payout|transferenc/.test(blob)) {
+    return { skip: true, reason: 'saque/transferência' };
+  }
+  if (/debit|debito/.test(blob)) {
+    return { skip: false, type: 'debito', label: 'Débito' };
+  }
+  if (totalInstallments && totalInstallments > 1) {
+    return { skip: false, type: 'parcelado', label: `Crédito Parcelado ${totalInstallments}x` };
+  }
+  if (/parcel|instal/.test(blob)) {
+    return { skip: false, type: 'parcelado', label: `Crédito Parcelado ${totalInstallments || '?'}x` };
+  }
+  if (/credit|credito|vista/.test(blob)) {
+    return { skip: false, type: 'vista', label: 'Crédito à Vista' };
+  }
+  return { skip: true, reason: 'não identificada' };
+}
+
+function getNegotiatedRate(type, installments, cfg) {
+  if (type === 'debito') return numOrNull(cfg.debito);
+  if (type === 'vista') return numOrNull(cfg.vista);
+  if (type === 'pix') return numOrNull(cfg.pix);
+  if (type === 'parcelado' && installments >= 2 && installments <= 21) return numOrNull(cfg['p' + installments]);
+  return null;
+}
+function numOrNull(v) { return (v === undefined || v === null || isNaN(v)) ? null : v; }
+
+/* =========================================================================
+   6. FORMATAÇÃO
+   ========================================================================= */
+const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+const pct = (v) => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
+
+/* =========================================================================
+   7. MOTOR DE AUDITORIA
+   ========================================================================= */
+function runAudit(rows) {
+  const cfg = collectConfig();
+  const colMap = buildColumnMap(rows[0]);
+
+  let totalBruto = 0;
+  let totalTaxas = 0;
+  let divergences = [];
+  let ignoredCount = 0;
+  let noRateConfigured = 0;
+
+  rows.forEach(row => {
+    const modalityRaw = colMap.modality ? row[colMap.modality] : null;
+    const statusRaw = colMap.statusText ? row[colMap.statusText] : null;
+
+    const grossRaw = colMap.gross ? row[colMap.gross] : null;
+    const gross = parseFlexNumber(grossRaw);
+
+    if (isNaN(gross) || gross <= 0) { ignoredCount++; return; } // sem valor bruto válido ou estorno negativo
+
+    let totalInstallments = colMap.installTotal ? parseInt(parseFlexNumber(row[colMap.installTotal]), 10) : null;
+    if (!totalInstallments || isNaN(totalInstallments) || totalInstallments < 1) {
+      totalInstallments = extractInstallmentsFromText(modalityRaw) || 1;
+    }
+
+    const classification = classifyRow(modalityRaw, statusRaw, totalInstallments);
+    if (classification.skip) { ignoredCount++; return; }
+
+    const negotiatedRate = getNegotiatedRate(classification.type, totalInstallments, cfg);
+
+    const ratePercentRaw = colMap.ratePercent ? row[colMap.ratePercent] : null;
+    const feeCurrencyRaw = colMap.feeCurrency ? row[colMap.feeCurrency] : null;
+    const netRaw = colMap.net ? row[colMap.net] : null;
+
+    let appliedRate = parseFlexNumber(ratePercentRaw);
+    let feeValue = parseFlexNumber(feeCurrencyRaw);
+
+    if (isNaN(appliedRate)) {
+      if (!isNaN(feeValue)) {
+        appliedRate = (feeValue / gross) * 100;
+      } else {
+        const net = parseFlexNumber(netRaw);
+        if (!isNaN(net)) {
+          appliedRate = ((gross - net) / gross) * 100;
+          feeValue = gross - net;
+        }
+      }
+    }
+    if (isNaN(feeValue)) {
+      feeValue = !isNaN(appliedRate) ? gross * appliedRate / 100 : 0;
+    }
+    if (isNaN(appliedRate)) { ignoredCount++; return; } // não foi possível apurar a taxa praticada
+
+    totalBruto += gross;
+    totalTaxas += feeValue;
+
+    if (negotiatedRate === null) { noRateConfigured++; return; }
+
+    const EPS = 0.005; // tolerância de arredondamento
+    if (appliedRate > negotiatedRate + EPS) {
+      const diff = gross * (appliedRate - negotiatedRate) / 100;
+      const dateVal = colMap.date ? row[colMap.date] : '';
+      const timeVal = colMap.time ? row[colMap.time] : '';
+      const idVal = colMap.id ? row[colMap.id] : '—';
+      divergences.push({
+        datetime: [dateVal, timeVal].filter(v => v !== null && v !== undefined && v !== '').join(' '),
+        id: idVal,
+        label: classification.label,
+        gross, negotiatedRate, appliedRate, diff
+      });
+    }
+  });
+
+  const result = { totalBruto, totalTaxas, divergences, ignoredCount, noRateConfigured, totalRows: rows.length };
+  window.__lastAuditResult = result;
+  renderDashboard(result);
+}
+
+/* =========================================================================
+   8. RENDERIZAÇÃO DO DASHBOARD E TABELA
+   ========================================================================= */
+function renderDashboard({ totalBruto, totalTaxas, divergences, ignoredCount, noRateConfigured, totalRows }) {
+  document.getElementById('dashboard').classList.remove('hidden');
+
+  document.getElementById('stat-bruto').textContent = brl.format(totalBruto);
+  document.getElementById('stat-taxas').textContent = brl.format(totalTaxas);
+  document.getElementById('stat-count').textContent = divergences.length;
+
+  const totalDiff = divergences.reduce((s, d) => s + d.diff, 0);
+  document.getElementById('stat-prejuizo').textContent = brl.format(totalDiff);
+
+  const cardDiv = document.getElementById('card-divergencias');
+  const cardPrej = document.getElementById('card-prejuizo');
+  [cardDiv, cardPrej].forEach(c => {
+    c.classList.remove('bg-bad-bg','border-bad-border','text-bad','bg-good-bg','border-good-border');
+  });
+  const countEl = document.getElementById('stat-count');
+  const prejEl = document.getElementById('stat-prejuizo');
+  if (divergences.length > 0) {
+    cardDiv.classList.add('bg-bad-bg','border-bad-border'); countEl.classList.add('text-bad'); countEl.classList.remove('text-pine');
+    cardPrej.classList.add('bg-bad-bg','border-bad-border'); prejEl.classList.add('text-bad'); prejEl.classList.remove('text-pine');
+  } else {
+    cardDiv.classList.add('bg-good-bg','border-good-border'); countEl.classList.add('text-good'); countEl.classList.remove('text-bad');
+    cardPrej.classList.add('bg-good-bg','border-good-border'); prejEl.classList.add('text-good'); prejEl.classList.remove('text-bad');
+  }
+
+  const ignoredNote = document.getElementById('ignored-note');
+  const noteBits = [];
+  if (ignoredCount > 0) noteBits.push(`${ignoredCount} linha(s) ignorada(s) (saques/transferências, estornos/cancelamentos ou modalidade não identificada)`);
+  if (noRateConfigured > 0) noteBits.push(`${noRateConfigured} transação(ões) sem taxa negociada configurada para comparação`);
+  if (noteBits.length) {
+    ignoredNote.textContent = `ℹ ${noteBits.join(' · ')} — de ${totalRows} linhas lidas no arquivo.`;
+    ignoredNote.classList.remove('hidden');
+  } else {
+    ignoredNote.classList.add('hidden');
+  }
+
+  const successBox = document.getElementById('success-box');
+  const tableBox = document.getElementById('table-box');
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = '';
+
+  if (divergences.length === 0) {
+    successBox.classList.remove('hidden');
+    tableBox.classList.add('hidden');
+    return;
+  }
+  successBox.classList.add('hidden');
+  tableBox.classList.remove('hidden');
+
+  divergences.sort((a, b) => b.diff - a.diff);
+  document.getElementById('table-count-badge').textContent = `${divergences.length} linha${divergences.length > 1 ? 's' : ''}`;
+
+  divergences.forEach(d => {
+    const tr = document.createElement('tr');
+    tr.className = 'divergence-row hover:bg-bad-bg/40';
+    tr.innerHTML = `
+      <td class="px-4 py-2.5 whitespace-nowrap text-ink/80">${escapeHtml(d.datetime || '—')}</td>
+      <td class="px-4 py-2.5 whitespace-nowrap text-ink/80">${escapeHtml(String(d.id))}</td>
+      <td class="px-4 py-2.5 whitespace-nowrap text-ink">${escapeHtml(d.label)}</td>
+      <td class="px-4 py-2.5 text-right whitespace-nowrap text-ink">${brl.format(d.gross)}</td>
+      <td class="px-4 py-2.5 text-right whitespace-nowrap text-good">${pct(d.negotiatedRate)}</td>
+      <td class="px-4 py-2.5 text-right whitespace-nowrap text-bad font-semibold">${pct(d.appliedRate)}</td>
+      <td class="px-4 py-2.5 text-right whitespace-nowrap text-bad font-semibold">${brl.format(d.diff)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* =========================================================================
+   9. DOWNLOAD DO RELATÓRIO (.xlsx) — liberado após e-mail válido
+   ========================================================================= */
+const downloadEmailInput = document.getElementById('download-email');
+const downloadEmailError = document.getElementById('download-email-error');
+const btnDownloadReport = document.getElementById('btn-download-report');
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isValidEmail(v) { return EMAIL_REGEX.test(String(v || '').trim()); }
+
+downloadEmailInput.addEventListener('input', () => {
+  const ok = isValidEmail(downloadEmailInput.value);
+  btnDownloadReport.disabled = !ok;
+  downloadEmailError.classList.add('hidden');
+});
+
+const downloadEmailStatus = document.getElementById('download-email-status');
+
+function setDownloadStatus(message, type = 'neutral') {
+  downloadEmailStatus.textContent = message;
+  downloadEmailStatus.classList.remove('hidden', 'text-bad', 'text-good', 'text-ink/50');
+  downloadEmailStatus.classList.add(type === 'error' ? 'text-bad' : type === 'success' ? 'text-good' : 'text-ink/50');
+}
+
+async function captureLeadEmail(email) {
+  const body = new URLSearchParams({
+    'form-name': 'lead-capture',
+    'email': email,
+    'bot-field': ''
+  });
+
+  const response = await fetch('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString()
+  });
+
+  if (!response.ok) throw new Error('Falha ao registrar o e-mail.');
+}
+
+btnDownloadReport.addEventListener('click', async () => {
+  const email = downloadEmailInput.value.trim();
+  if (!isValidEmail(email)) {
+    downloadEmailError.classList.remove('hidden');
+    return;
+  }
+  const result = window.__lastAuditResult;
+  if (!result) return;
+
+  btnDownloadReport.disabled = true;
+  setDownloadStatus('Registrando e-mail...', 'neutral');
+
+  try {
+    await captureLeadEmail(email);
+    setDownloadStatus('E-mail registrado. Gerando relatório...', 'success');
+    generateXlsxReport(result, email);
+  } catch (err) {
+    setDownloadStatus('Não foi possível registrar o e-mail. O relatório não foi baixado. Tente novamente.', 'error');
+    btnDownloadReport.disabled = false;
+  }
+});
+
+function generateXlsxReport(result, email) {
+  const { totalBruto, totalTaxas, divergences, ignoredCount, noRateConfigured, totalRows } = result;
+  const totalDiff = divergences.reduce((s, d) => s + d.diff, 0);
+  const now = new Date();
+  const timestamp = now.toLocaleString('pt-BR');
+
+  // Sheet 1 — Resumo executivo
+  const resumoRows = [
+    ['Relatório de Auditoria de Taxas POS'],
+    [],
+    ['Gerado em', timestamp],
+    ['E-mail do solicitante', email],
+    ['Linhas lidas no arquivo', totalRows],
+    [],
+    ['Total Bruto Processado (R$)', Number(totalBruto.toFixed(2))],
+    ['Total de Taxas Cobradas (R$)', Number(totalTaxas.toFixed(2))],
+    ['Total de Divergências Encontradas', divergences.length],
+    ['Valor Total de Prejuízo/Divergência (R$)', Number(totalDiff.toFixed(2))],
+    [],
+    ['Linhas ignoradas (Pix sem regra aplicável, saques, estornos, não identificadas)', ignoredCount],
+    ['Transações sem taxa negociada configurada para comparação', noRateConfigured],
+  ];
+  const wsResumo = XLSX.utils.aoa_to_sheet(resumoRows);
+  wsResumo['!cols'] = [{ wch: 55 }, { wch: 25 }];
+
+  // Sheet 2 — Transações divergentes
+  const header = ['Data/Hora', 'ID / Código', 'Modalidade', 'Valor Bruto (R$)', 'Taxa Negociada (%)', 'Taxa Praticada (%)', 'Diferença Cobrada a Mais (R$)'];
+  let divergenciasRows;
+  if (divergences.length === 0) {
+    divergenciasRows = [header, ['Nenhuma divergência de taxa encontrada neste relatório.']];
+  } else {
+    const sorted = [...divergences].sort((a, b) => b.diff - a.diff);
+    divergenciasRows = [header, ...sorted.map(d => [
+      d.datetime || '—',
+      String(d.id),
+      d.label,
+      Number(d.gross.toFixed(2)),
+      Number(d.negotiatedRate.toFixed(2)),
+      Number(d.appliedRate.toFixed(2)),
+      Number(d.diff.toFixed(2)),
+    ])];
+  }
+  const wsDivergencias = XLSX.utils.aoa_to_sheet(divergenciasRows);
+  wsDivergencias['!cols'] = [{ wch: 18 }, { wch: 20 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 20 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
+  XLSX.utils.book_append_sheet(wb, wsDivergencias, 'Divergências');
+
+  const fileDate = now.toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `auditoria-taxas-pos_${fileDate}.xlsx`);
+}
+</script>
+</body>
+</html>
