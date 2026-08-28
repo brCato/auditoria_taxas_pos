@@ -329,6 +329,7 @@ document.getElementById('btn-save-config').addEventListener('click', () => {
 document.getElementById('btn-clear-config').addEventListener('click', () => {
   document.querySelectorAll('.rate-input').forEach(i => i.value = '');
   localStorage.removeItem(STORAGE_KEY);
+  if (window.__lastParsedRows) runAudit(window.__lastParsedRows);
 });
 
 loadConfig();
@@ -420,11 +421,16 @@ function normalizeText(v) {
 const COLUMN_SYNONYMS = {
   date:            ['data', 'data venda', 'data da venda', 'transaction date', 'date', 'data movimento', 'data lancamento'],
   time:            ['hora', 'time'],
-  id:              ['transaction id', 'id da transacao', 'codigo transacao', 'stone id', 'ton id', 'external id',
-                     'source id', 'cod referencia', 'receipt number', 'nsu tid', 'nsu', 'id', 'codigo da venda'],
-  modality:        ['modalidade', 'tipo de pagamento', 'tipo pagamento', 'payment method', 'produto',
-                     'tipo de venda', 'card type', 'meio de pagamento', 'transaction type'],
+  id:              ['transaction id', 'id da transacao', 'codigo transacao', 'transacao', 'stone id', 'ton id',
+                     'external id', 'source id', 'cod referencia', 'receipt number', 'nsu tid', 'nsu', 'id',
+                     'codigo da venda'],
+  modality:        ['modalidade', 'tipo de pagamento', 'tipo pagamento', 'forma de pgto', 'forma pagamento',
+                     'forma de pagamento', 'payment method', 'produto', 'tipo de venda', 'card type',
+                     'meio de pagamento', 'transaction type'],
   statusText:      ['status', 'status pgto', 'situacao'],
+  recordType:      ['tipo registro', 'record type'],
+  cardType:        ['card type', 'tipo cartao'],
+  description:     ['description', 'descricao'],
   installTotal:    ['n parcelas', 'total parcelas', 'parcelas', 'installments', 'numero parcelas', 'qtd parcelas'],
   installCurrent:  ['n parcela', 'parcela atual', 'numero parcela', 'parcela', 'installment number'],
   gross:           ['valor bruto brl', 'valor bruto', 'gross amount', 'amount brl', 'amount', 'valor da venda', 'valor',],
@@ -441,10 +447,14 @@ function buildColumnMap(sampleRow) {
   originalKeys.forEach(k => { normalizedToOriginal[normalizeHeader(k)] = k; });
 
   const map = {};
+  const usedColumns = new Set();
+
   for (const field in COLUMN_SYNONYMS) {
     for (const syn of COLUMN_SYNONYMS[field]) {
-      if (normalizedToOriginal[syn] !== undefined) {
-        map[field] = normalizedToOriginal[syn];
+      const original = normalizedToOriginal[syn];
+      if (original !== undefined && !usedColumns.has(original)) {
+        map[field] = original;
+        usedColumns.add(original);
         break;
       }
     }
@@ -478,22 +488,53 @@ function extractInstallmentsFromText(text) {
   return null;
 }
 
+function buildInstallmentTotals(rows, colMap) {
+  const totals = new Map();
+  if (!colMap.installCurrent || !colMap.id) return totals;
+
+  rows.forEach(row => {
+    const id = row[colMap.id];
+    const current = parseInt(parseFlexNumber(row[colMap.installCurrent]), 10);
+    if (id === null || id === undefined || id === '' || !Number.isFinite(current) || current < 1) return;
+
+    const key = String(id).trim();
+    totals.set(key, Math.max(totals.get(key) || 0, current));
+  });
+
+  return totals;
+}
+
 /* =========================================================================
    5. CLASSIFICAÇÃO DE MODALIDADE
    ========================================================================= */
-function classifyRow(modalityRaw, statusRaw, totalInstallments) {
-  const blob = normalizeText([modalityRaw, statusRaw].filter(Boolean).join(' '));
+function classifyRow(modalityRaw, statusRaw, totalInstallments, cardTypeRaw = null, descriptionRaw = null) {
+  const blob = normalizeText([modalityRaw, statusRaw, cardTypeRaw, descriptionRaw].filter(Boolean).join(' '));
 
   if (/cancel|estorn|refund|reembols|chargeback|devolv/.test(blob)) {
     return { skip: true, reason: 'cancelada/estornada' };
   }
-  if (/\bpix\b/.test(blob)) {
+  if (/\bpix\b/.test(blob) || /pix[_ -]?payment/.test(blob)) {
     return { skip: false, type: 'pix', label: 'Pix' };
   }
+
+  // Cielo/Vero/Bin usam códigos de Produto no EDI.
+  // Nos layouts presentes no mapeamento: 01 = débito; 04 = crédito;
+  // 06 = crédito à vista (quando não há parcelamento explícito).
+  const productCode = normalizeText(modalityRaw).trim();
+  if (/^01$/.test(productCode)) {
+    return { skip: false, type: 'debito', label: 'Débito' };
+  }
+  if (/^04$|^06$/.test(productCode)) {
+    if (totalInstallments && totalInstallments > 1) {
+      return { skip: false, type: 'parcelado', label: `Crédito Parcelado ${totalInstallments}x` };
+    }
+    return { skip: false, type: 'vista', label: 'Crédito à Vista' };
+  }
+
   if (/saque|withdraw|payout|transferenc/.test(blob)) {
     return { skip: true, reason: 'saque/transferência' };
   }
-  if (/debit|debito/.test(blob)) {
+  if (/debit|debito|debit_card/.test(blob)) {
     return { skip: false, type: 'debito', label: 'Débito' };
   }
   if (totalInstallments && totalInstallments > 1) {
@@ -502,7 +543,7 @@ function classifyRow(modalityRaw, statusRaw, totalInstallments) {
   if (/parcel|instal/.test(blob)) {
     return { skip: false, type: 'parcelado', label: `Crédito Parcelado ${totalInstallments || '?'}x` };
   }
-  if (/credit|credito|vista/.test(blob)) {
+  if (/credit|credito|credit_card|vista/.test(blob)) {
     return { skip: false, type: 'vista', label: 'Crédito à Vista' };
   }
   return { skip: true, reason: 'não identificada' };
@@ -530,6 +571,19 @@ function runAudit(rows) {
   const cfg = collectConfig();
   const colMap = buildColumnMap(rows[0]);
 
+  const missing = [];
+  if (!colMap.modality) missing.push('Forma de Pgto.');
+  if (!colMap.gross) missing.push('Valor');
+  if (!colMap.feeCurrency && !colMap.ratePercent && !colMap.net) {
+    missing.push('Taxas, taxa percentual ou Valor Final');
+  }
+  if (missing.length) {
+    showParseError('Não foi possível identificar as colunas necessárias para a auditoria: ' + missing.join(', ') + '.');
+    return;
+  }
+
+  const installmentTotals = buildInstallmentTotals(rows, colMap);
+
   let totalBruto = 0;
   let totalTaxas = 0;
   let divergences = [];
@@ -539,18 +593,47 @@ function runAudit(rows) {
   rows.forEach(row => {
     const modalityRaw = colMap.modality ? row[colMap.modality] : null;
     const statusRaw = colMap.statusText ? row[colMap.statusText] : null;
+    const cardTypeRaw = colMap.cardType ? row[colMap.cardType] : null;
+    const descriptionRaw = colMap.description ? row[colMap.description] : null;
 
     const grossRaw = colMap.gross ? row[colMap.gross] : null;
-    const gross = parseFlexNumber(grossRaw);
+    let gross = parseFlexNumber(grossRaw);
+    const grossHeader = colMap.gross ? normalizeHeader(colMap.gross) : '';
+    const feeHeader = colMap.feeCurrency ? normalizeHeader(colMap.feeCurrency) : '';
+    const rateHeader = colMap.ratePercent ? normalizeHeader(colMap.ratePercent) : '';
+
+    // BIN informa valores em centavos e MDR em basis points.
+    if (/cent/.test(grossHeader)) gross = gross / 100;
 
     if (isNaN(gross) || gross <= 0) { ignoredCount++; return; } // sem valor bruto válido ou estorno negativo
 
-    let totalInstallments = colMap.installTotal ? parseInt(parseFlexNumber(row[colMap.installTotal]), 10) : null;
+    // EDI (Cielo/Vero/Bin): somente o registro 1 é o lançamento financeiro.
+    const recordTypeRaw = colMap.recordType ? row[colMap.recordType] : null;
+    if (recordTypeRaw !== null && recordTypeRaw !== undefined && recordTypeRaw !== '') {
+      const rt = String(recordTypeRaw).trim();
+      if (/^[029]$/.test(rt)) { ignoredCount++; return; }
+    }
+
+    let totalInstallments = colMap.installTotal
+      ? parseInt(parseFlexNumber(row[colMap.installTotal]), 10)
+      : null;
+
+    // "Parcela" é a parcela atual. Se não houver total explícito,
+    // inferimos o total pelo maior número de parcela da mesma transação.
+    const idRaw = colMap.id ? row[colMap.id] : null;
+    const inferredTotal = idRaw !== null && idRaw !== undefined
+      ? installmentTotals.get(String(idRaw).trim())
+      : null;
+
+    if (Number.isFinite(inferredTotal) && inferredTotal > 1) {
+      totalInstallments = inferredTotal;
+    }
+
     if (!totalInstallments || isNaN(totalInstallments) || totalInstallments < 1) {
       totalInstallments = extractInstallmentsFromText(modalityRaw) || 1;
     }
 
-    const classification = classifyRow(modalityRaw, statusRaw, totalInstallments);
+    const classification = classifyRow(modalityRaw, statusRaw, totalInstallments, cardTypeRaw, descriptionRaw);
     if (classification.skip) { ignoredCount++; return; }
 
     const negotiatedRate = getNegotiatedRate(classification.type, totalInstallments, cfg);
@@ -562,19 +645,21 @@ function runAudit(rows) {
     let appliedRate = parseFlexNumber(ratePercentRaw);
     let feeValue = parseFlexNumber(feeCurrencyRaw);
 
-    if (isNaN(appliedRate)) {
-      if (!isNaN(feeValue)) {
+    if (!isNaN(feeValue) && /cent/.test(feeHeader)) feeValue = feeValue / 100;
+    if (!isNaN(appliedRate) && /bps|basis pts/.test(rateHeader)) appliedRate = appliedRate / 100;
+
+    // No relatório de recebíveis, "Taxas" é o valor da taxa em R$.
+    // A taxa efetivamente cobrada é calculada sobre o valor bruto.
+    if (!isNaN(feeValue)) {
+      appliedRate = (feeValue / gross) * 100;
+    } else if (!isNaN(appliedRate)) {
+      feeValue = gross * appliedRate / 100;
+    } else {
+      const net = parseFlexNumber(netRaw);
+      if (!isNaN(net)) {
+        feeValue = gross - net;
         appliedRate = (feeValue / gross) * 100;
-      } else {
-        const net = parseFlexNumber(netRaw);
-        if (!isNaN(net)) {
-          appliedRate = ((gross - net) / gross) * 100;
-          feeValue = gross - net;
-        }
       }
-    }
-    if (isNaN(feeValue)) {
-      feeValue = !isNaN(appliedRate) ? gross * appliedRate / 100 : 0;
     }
     if (isNaN(appliedRate)) { ignoredCount++; return; } // não foi possível apurar a taxa praticada
 
@@ -697,6 +782,7 @@ downloadEmailInput.addEventListener('input', () => {
 const downloadEmailStatus = document.getElementById('download-email-status');
 
 function setDownloadStatus(message, type = 'neutral') {
+  if (!downloadEmailStatus) return;
   downloadEmailStatus.textContent = message;
   downloadEmailStatus.classList.remove('hidden', 'text-bad', 'text-good', 'text-ink/50');
   downloadEmailStatus.classList.add(type === 'error' ? 'text-bad' : type === 'success' ? 'text-good' : 'text-ink/50');
