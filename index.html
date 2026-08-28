@@ -879,5 +879,249 @@ function generateXlsxReport(result, email) {
   XLSX.writeFile(wb, `auditoria-taxas-pos_${fileDate}.xlsx`);
 }
 </script>
+
+<script>
+/* ========================================================================
+   AUDITOR ENGINE V2 — MULTI-ADQUIRENTE / ADAPTERS
+   Redesigned to keep each acquired layout isolated and auditable.
+   ======================================================================== */
+(function(){
+  'use strict';
+
+  const V2 = {
+    version: '2.0.0',
+    adapters: {}
+  };
+
+  const norm = h => String(h ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+    .replace(/%/g,' pct ').replace(/r\$/gi,' brl ').replace(/[^a-z0-9\s]/g,' ')
+    .replace(/\s+/g,' ').trim();
+  const val = (row, name) => row[name];
+  const pick = (row, aliases) => {
+    for (const a of aliases) if (Object.prototype.hasOwnProperty.call(row,a)) return row[a];
+    return null;
+  };
+  const n = v => { const x=parseFlexNumber(v); return Number.isFinite(x)?x:null; };
+  const text = v => String(v ?? '').trim();
+  const low = v => text(v).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+  function parseXofY(v){
+    const s=text(v).replace(/'/g,'');
+    let m=s.match(/^(\d+)\s*\/\s*(\d+)$/);
+    if(m) return {current:+m[1], total:+m[2]};
+    m=s.match(/^(\d+)\s*(?:de|of)\s*(\d+)$/i);
+    if(m) return {current:+m[1], total:+m[2]};
+    m=s.match(/^(\d+)\s*x$/i);
+    if(m) return {current:1,total:+m[1]};
+    return null;
+  }
+
+  function installment(row, spec){
+    if(spec && spec.total){
+      const total=n(pick(row,spec.total));
+      const current=spec.current?n(pick(row,spec.current)):null;
+      return {current:current||1,total:(total&&total>0)?total:1};
+    }
+    if(spec && spec.combined){
+      const p=parseXofY(pick(row,spec.combined));
+      if(p) return p;
+    }
+    return {current:1,total:1};
+  }
+
+  function classify(modality, paymentMethod, transactionType, installments){
+    const s=low([modality,paymentMethod,transactionType].filter(Boolean).join(' '));
+    if(/pix/.test(s)) return {type:'pix',label:'Pix'};
+    if(/debito|debit/.test(s)) return {type:'debito',label:'Débito'};
+    if(/parcel|instal|parc\.|installment/.test(s) || installments>=2) return {type:'parcelado',label:`Crédito ${installments}x`};
+    if(/credito|credit|card|sale|payment|recebimento/.test(s)) return {type:'vista',label:'Crédito à Vista'};
+    return {type:'unknown',label:'Não identificada'};
+  }
+
+  function statusSkip(status, type, gross){
+    const s=low(status);
+    if(gross!==null && gross<0) return 'NEGATIVO/ESTORNO';
+    if(/refund|refunded|estorno|estornado|cancel|cancelado|cancelada|reversal/.test(s)) return 'CANCELADO_ESTORNADO';
+    if(type && /refund|estorno|cancel/.test(low(type))) return 'CANCELADO_ESTORNADO';
+    return null;
+  }
+
+  function signature(headers, required){
+    const set=new Set(headers.map(norm));
+    return required.every(x=>set.has(norm(x)));
+  }
+
+  function adapter(name, required, map, options={}){
+    V2.adapters[name]={name,required:required.map(norm),map,options};
+  }
+
+  adapter('Stone', ['Stone ID','Data da Venda','Tipo de Pagamento','Valor Bruto (R$)','Taxa (%)','Taxa (R$)'], {
+    id:['Stone ID','NSU'], date:['Data da Venda'], time:['Hora'], modality:['Tipo de Pagamento'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['Taxa (%)'], fee:['Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Nº Parcelas'],current:['Parcela Atual']}
+  });
+  adapter('Cielo', ['Tipo Registro','Nº EC','Data Lançamento','Total Parcelas','Valor Bruto','Taxa MDR (%)'], {
+    id:['NSU / TID','Nº RO'], date:['Data Lançamento'], modality:['Produto'], status:['Status Pgto'], gross:['Valor Bruto'], rate:['Taxa MDR (%)'], fee:['Valor MDR'], net:['Valor Líquido'], installments:{total:['Total Parcelas'],current:['Nº Parcela']}, record:['Tipo Registro']
+  }, {recordType:'1'});
+  adapter('Rede', ['Data Venda','NSU','TID','Produto','Total Parcelas','Valor Bruto (R$)','Taxa (%)','Valor Taxa (R$)'], {
+    id:['TID','NSU'], date:['Data Venda'], time:['Hora'], modality:['Produto'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['Taxa (%)'], fee:['Valor Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Total Parcelas'],current:['Nº Parcela']}
+  });
+  adapter('Getnet', ['Data Venda','NSU','TID','Modalidade','Total Parcelas','Valor Bruto (R$)','Taxa MDR (%)','Valor Taxa (R$)'], {
+    id:['TID','NSU'], date:['Data Venda'], time:['Hora'], modality:['Modalidade','Tipo Transação'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['Taxa MDR (%)'], fee:['Valor Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Total Parcelas'],current:['Nº Parcela']}
+  });
+  adapter('PagBank', ['Data','Tipo','Status','Código Transação','Tipo Pagamento','Parcelas','Valor Bruto (R$)','Tarifa (R$)'], {
+    id:['Código Transação','Cód. Referência','NSU'], date:['Data'], time:['Hora'], modality:['Tipo Pagamento'], status:['Status','Tipo'], gross:['Valor Bruto (R$)'], fee:['Tarifa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Parcelas']}
+  });
+  adapter('Ton', ['Ton ID','Data','Tipo Pagamento','Valor Bruto (R$)','Taxa (%)','Taxa (R$)'], {
+    id:['Ton ID','NSU'], date:['Data'], time:['Hora'], modality:['Tipo Pagamento'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['Taxa (%)'], fee:['Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Nº Parcelas']}
+  });
+  adapter('SumUp', ['Date','Status','Transaction ID','Payment Method','Card Type','Amount (BRL)','Fee (BRL)','Installments'], {
+    id:['Transaction ID','Transaction Code'], date:['Date'], time:['Time'], modality:['Card Type','Payment Method'], status:['Status'], gross:['Amount (BRL)'], fee:['Fee (BRL)'], net:['Net Amount (BRL)'], installments:{total:['Installments']}
+  });
+  adapter('InfinitePay', ['ID da Transação','Data','Status','Tipo de Venda','Meio de Pagamento','Nº Parcelas','Valor Bruto (R$)','Taxa (%)','Taxa (R$)'], {
+    id:['ID da Transação','NSU'], date:['Data'], time:['Hora'], modality:['Meio de Pagamento','Tipo de Venda'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['Taxa (%)'], fee:['Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Nº Parcelas']}
+  });
+  adapter('SafraPay', ['Data Venda','NSU','TID','Tipo Transação','Parcelas','Valor Bruto (R$)','MDR (%)','Valor MDR (R$)','Antecipação','Taxa ARV (R$)'], {
+    id:['TID','NSU'], date:['Data Venda'], time:['Hora'], modality:['Tipo Transação'], status:['Status'], gross:['Valor Bruto (R$)'], rate:['MDR (%)'], fee:['Valor MDR (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Parcelas']}, anticipation:['Antecipação'], anticipationFee:['Taxa ARV (R$)']
+  });
+  adapter('Mercado Pago', ['DATE','SOURCE_ID','EXTERNAL_ID','RECORD_TYPE','GROSS_AMOUNT','MP_FEE_AMOUNT','INSTALLMENTS','PAYMENT_METHOD','STATUS'], {
+    id:['EXTERNAL_ID','SOURCE_ID'], date:['DATE'], modality:['PAYMENT_METHOD','DESCRIPTION'], status:['STATUS','RECORD_TYPE'], gross:['GROSS_AMOUNT'], fee:['MP_FEE_AMOUNT'], net:['NET_CREDIT_AMOUNT'], installments:{total:['INSTALLMENTS']}, record:['RECORD_TYPE']
+  }, {recordType:'payment'});
+  adapter('Vero', ['Tipo Registro','Nº EC','Data Movimento','Total Parcelas','Valor Bruto','Taxa MDR (%)','Valor MDR','NSU'], {
+    id:['NSU'], date:['Data Movimento'], modality:['Produto'], status:['Status'], gross:['Valor Bruto'], rate:['Taxa MDR (%)'], fee:['Valor MDR'], net:['Valor Líquido'], installments:{total:['Total Parcelas'],current:['Nº Parcela']}, record:['Tipo Registro']
+  }, {recordType:'1'});
+  adapter('Bin', ['Tipo Registro','Nº EC','Data Movimento','Total Parcelas','Valor Bruto (cent.)','Taxa MDR (bps)','Valor Taxa (cent.)','NSU'], {
+    id:['NSU'], date:['Data Movimento'], modality:['Produto'], status:['Status'], gross:['Valor Bruto (cent.)'], rate:['Taxa MDR (bps)'], fee:['Valor Taxa (cent.)'], net:['Valor Líquido (cent.)'], installments:{total:['Total Parcelas'],current:['Nº Parcela']}, record:['Tipo Registro']
+  }, {recordType:'1', moneyScale:0.01, rateScale:0.01, feeScale:0.01});
+  adapter('Global Payments', ['Transaction Date','NSU','TID','Transaction Type','Installments','Gross Amount','MDR Rate (%)','MDR Amount','Currency','Status'], {
+    id:['TID','NSU'], date:['Transaction Date'], time:['Time'], modality:['Transaction Type'], status:['Status'], gross:['Gross Amount'], rate:['MDR Rate (%)'], fee:['MDR Amount'], net:['Net Amount'], installments:{total:['Installments']}, currency:['Currency']
+  });
+  adapter('Zettle', ['Date','Transaction Type','Status','Transaction ID','Payment Method','Amount (BRL)','Fee (BRL)'], {
+    id:['Transaction ID','Receipt Number'], date:['Date'], time:['Time'], modality:['Payment Method','Transaction Type'], status:['Status','Transaction Type'], gross:['Amount (BRL)'], fee:['Fee (BRL)'], net:['Net Amount (BRL)'], installments:{total:[]}
+  });
+  adapter('Clinipay / Recebíveis', ['Data','Transação','Parcela','Forma de Pgto.','Status','Valor','Taxas','Valor Final'], {
+    id:['Transação'], date:['Data'], time:[], modality:['Forma de Pgto.'], status:['Status'], gross:['Valor'], fee:['Taxas'], net:['Valor Final'], installments:{combined:['Parcela']}, anticipation:['Antecipado'], otherFees:['Outras Taxas'], capture:['Meio de Captura']
+  }, {clinipay:true});
+  adapter('Nubank', ['Data','ID da Transação','Tipo de Transação','Status','Tipo de Pagamento','Parcelas','Valor Bruto (R$)','Taxa (%)','Taxa (R$)'], {
+    id:['ID da Transação','NSU'], date:['Data'], time:['Hora'], modality:['Tipo de Pagamento','Tipo de Transação'], status:['Status','Tipo de Transação'], gross:['Valor Bruto (R$)'], rate:['Taxa (%)'], fee:['Taxa (R$)'], net:['Valor Líquido (R$)'], installments:{total:['Parcelas']}
+  });
+
+  function detect(rows){
+    const headers=Object.keys(rows[0]||{});
+    const scored=[];
+    for(const a of Object.values(V2.adapters)){
+      let score=0;
+      for(const req of a.required) if(headers.map(norm).includes(req)) score++;
+      const ratio=score/a.required.length;
+      if(ratio>=0.70) scored.push({a,score,ratio});
+    }
+    scored.sort((x,y)=>y.ratio-x.ratio || y.score-x.score);
+    if(!scored.length) return null;
+    const best=scored[0];
+    const tied=scored.filter(x=>x.ratio===best.ratio && x.score===best.score);
+    if(tied.length>1) return {ambiguous:true,candidates:tied.map(x=>x.a.name)};
+    return {adapter:best.a,confidence:best.ratio,score:best.score};
+  }
+
+  function mapRow(row,a){
+    const m=a.map;
+    const out={};
+    for(const k of ['id','date','time','modality','status','gross','rate','fee','net','record','anticipation','anticipationFee','currency','otherFees','capture']) out[k]=m[k]?pick(row,m[k]):null;
+    out.installments=installment(row,m.installments);
+    if(a.options.moneyScale) {
+      out.gross=out.gross==null?null:out.gross*a.options.moneyScale;
+      if(out.fee!=null) out.fee*=a.options.feeScale;
+      if(out.net!=null) out.net*=a.options.moneyScale;
+    }
+    if(a.options.rateScale && out.rate!=null) out.rate*=a.options.rateScale;
+    if(out.anticipationFee!=null) out.anticipationFee=n(out.anticipationFee);
+    return out;
+  }
+
+  function negotiated(type,total,cfg){
+    if(type==='debito') return numOrNull(cfg.debito);
+    if(type==='vista') return numOrNull(cfg.vista);
+    if(type==='pix') return numOrNull(cfg.pix);
+    if(type==='parcelado' && total>=2 && total<=21) return numOrNull(cfg['p'+total]);
+    return null;
+  }
+
+  function auditV2(rows){
+    if(!rows.length) return null;
+    const detected=detect(rows);
+    if(!detected){ showParseError('Layout não identificado. Nenhum dos 15 adapters possui evidência suficiente para este arquivo.'); return null; }
+    if(detected.ambiguous){ showParseError('Layout ambíguo: '+detected.candidates.join(', ')+'. Selecione o adquirente antes de auditar.'); return null; }
+    const a=detected.adapter, cfg=collectConfig();
+    const seen=new Set(), divergences=[], diagnostics=[];
+    let totalBruto=0,totalTaxas=0,ignoredCount=0,noRateConfigured=0,audited=0,uniqueTx=0;
+    const txSeen=new Set();
+
+    rows.forEach((row,idx)=>{
+      const r=mapRow(row,a);
+      const gross=n(r.gross);
+      const skip=statusSkip(r.status,r.modality,gross);
+      if(a.options.recordType && text(r.record)!==a.options.recordType){ ignoredCount++; diagnostics.push({row:idx+2,status:'REGISTRO_AUXILIAR',reason:'Tipo de registro não auditável'}); return; }
+      if(skip){ ignoredCount++; diagnostics.push({row:idx+2,status:skip,reason:'Linha não representa venda auditável'}); return; }
+      if(gross===null || gross<=0){ ignoredCount++; diagnostics.push({row:idx+2,status:'DADOS_INSUFICIENTES',reason:'Valor bruto inválido ou não positivo'}); return; }
+      if(a.map.currency){ const cur=low(r.currency); if(cur && cur!=='brl'){ ignoredCount++; diagnostics.push({row:idx+2,status:'MOEDA_NAO_BRL',reason:'Moeda '+r.currency}); return; } }
+
+      let modalityForClassification=r.modality;
+      // Product codes used by EDI layouts must be interpreted by their adapter.
+      if(a.name==='Cielo' || a.name==='Vero' || a.name==='Bin') {
+        const p=low(r.modality);
+        if(p==='01') modalityForClassification='debito';
+        else if(p==='04' || p==='06') modalityForClassification=(r.installments.total>=2?'credito parcelado':'credito');
+      }
+      const cls=classify(modalityForClassification,null,modalityForClassification,r.installments.total);
+      if(cls.type==='unknown'){ ignoredCount++; diagnostics.push({row:idx+2,status:'MODALIDADE_NAO_IDENTIFICADA',reason:String(r.modality||'vazio')}); return; }
+      const key=String(r.id??'').trim() || ['anon',idx].join('-');
+      const txKey=a.name+'|'+key;
+      const duplicate=txSeen.has(txKey);
+      txSeen.add(txKey);
+      if(!duplicate) uniqueTx++;
+
+      let fee=n(r.fee), applied=n(r.rate);
+      // mapRow já converteu unidades monetárias do adapter.
+      if(fee!=null) applied = (fee/gross)*100;
+      else if(applied==null && n(r.net)!=null) applied=((gross-n(r.net))/gross)*100;
+
+      // No relatório de recebíveis da Clinipay, quando Antecipado=Sim e não há
+      // campo explícito de MDR, Taxas não pode ser tratada como MDR sem risco de
+      // misturar antecipação/ARV. A linha fica diagnosticada, não vira falso positivo.
+      if(a.options.clinipay && low(r.anticipation)==='sim') {
+        ignoredCount++;
+        diagnostics.push({row:idx+2,status:'MDR_NAO_ISOLAVEL',reason:'Antecipado=Sim e o layout não fornece MDR separado de outros custos'});
+        return;
+      }
+      if(applied==null || !Number.isFinite(applied)){ ignoredCount++; diagnostics.push({row:idx+2,status:'TAXA_NAO_APURAVEL',reason:'Não foi possível determinar o MDR'}); return; }
+
+      // SafraPay: ARV é custo separado do MDR.
+      const extraAnt=a.name==='SafraPay' && low(r.anticipation)==='s' ? n(r.anticipationFee)||0 : 0;
+      totalBruto += duplicate ? 0 : gross;
+      totalTaxas += duplicate ? 0 : (fee==null?gross*applied/100:fee);
+      audited++;
+
+      const negotiatedRate=negotiated(cls.type,r.installments.total,cfg);
+      if(negotiatedRate==null){ noRateConfigured++; diagnostics.push({row:idx+2,status:'SEM_TAXA_CONFIGURADA',reason:`${cls.type}/${r.installments.total}x`}); return; }
+      const EPS=0.005;
+      const diff=gross*(applied-negotiatedRate)/100;
+      const financial=Math.max(0,diff);
+      if(applied>negotiatedRate+EPS && !duplicate){
+        divergences.push({datetime:[r.date,r.time].filter(Boolean).join(' '),id:r.id||'—',label:cls.label,gross,negotiatedRate,appliedRate:applied,diff:financial,rawDifference:diff,installmentCurrent:r.installments.current,installmentTotal:r.installments.total,acquirer:a.name,anticipationFee:extraAnt});
+      }
+    });
+
+    const result={totalBruto,totalTaxas,divergences,ignoredCount,noRateConfigured,totalRows:rows.length,auditedRows:audited,uniqueTransactions:uniqueTx,acquirer:a.name,confidence:detected.confidence,diagnostics,engineVersion:V2.version};
+    window.__lastAuditResult=result;
+    window.__auditDiagnostics={adapter:a,detected,result};
+    renderDashboard(result);
+    return result;
+  }
+
+  // Expose diagnostic API for debugging and preserve existing UI contract.
+  window.__AUDITOR_V2=V2;
+  window.__detectAcquirer=rows=>detect(rows);
+  window.__auditV2=auditV2;
+  window.runAudit=auditV2;
+})();
+</script>
 </body>
 </html>
